@@ -1,9 +1,12 @@
-package com.example.scannerappjumptfest
+package com.example.scannerappjumpfest
 
 import android.app.AlertDialog
 import android.os.Bundle
 import android.view.View
-import android.widget.*
+import android.widget.Button
+import android.widget.ProgressBar
+import android.widget.TextView
+import android.widget.Toast
 import androidx.appcompat.app.AppCompatActivity
 import com.google.zxing.integration.android.IntentIntegrator
 import retrofit2.Call
@@ -11,14 +14,13 @@ import retrofit2.Callback
 import retrofit2.Response
 
 class MainActivity : AppCompatActivity() {
+
     private lateinit var btnScan: Button
     private lateinit var tvResult: TextView
-    private lateinit var spinnerEvent: Spinner
     private lateinit var progressBar: ProgressBar
 
-    private val api by lazy { ApiService.create() }
-    private var selectedEventId: String? = null
-    private var eventsList = listOf<Event>()
+    private val api = RetrofitClient.instance.create(ApiService::class.java)
+    private val SCANNER_TOKEN = "JUMPFEST_SCANNER_2025"
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -26,106 +28,68 @@ class MainActivity : AppCompatActivity() {
 
         btnScan = findViewById(R.id.btnScan)
         tvResult = findViewById(R.id.tvResult)
-        spinnerEvent = findViewById(R.id.spinnerEvent)
         progressBar = findViewById(R.id.progressBar)
 
-        loadEvents()
-
-        btnScan.setOnClickListener {
-            if (selectedEventId == null) {
-                Toast.makeText(this, "⚠️ Pilih event terlebih dahulu!", Toast.LENGTH_SHORT).show()
-                return@setOnClickListener
-            }
-
-            val integrator = IntentIntegrator(this)
-            integrator.setPrompt("Arahkan kamera ke QR Tiket JumpFest")
-            integrator.setOrientationLocked(false)
-            integrator.setBeepEnabled(true)
-            integrator.initiateScan()
-        }
+        btnScan.setOnClickListener { startScan() }
     }
 
-    /** 🔹 Fungsi untuk memuat daftar event dari server */
-    private fun loadEvents() {
-        api.getEvents().enqueue(object : Callback<EventResponse> {
-            override fun onResponse(call: Call<EventResponse>, response: Response<EventResponse>) {
-                if (response.isSuccessful && response.body()?.success == true) {
-                    val events = response.body()?.events ?: emptyList()
-
-                    // 🔹 Tambahkan deklarasi adapter di sini
-                    val names = events.map { "${it.nama_event} (${it.tanggal_event})" }
-                    val adapter = ArrayAdapter(
-                        this@MainActivity,
-                        android.R.layout.simple_spinner_item,
-                        names
-                    )
-                    adapter.setDropDownViewResource(android.R.layout.simple_spinner_dropdown_item)
-
-                    spinnerEvent.adapter = adapter  // ✅ ini yang akan menghubungkan ke spinner
-
-                    spinnerEvent.onItemSelectedListener = object : AdapterView.OnItemSelectedListener {
-                        override fun onItemSelected(
-                            parent: AdapterView<*>,
-                            view: android.view.View?,
-                            position: Int,
-                            id: Long
-                        ) {
-                            selectedEventId = events[position].id
-                        }
-
-                        override fun onNothingSelected(parent: AdapterView<*>) {
-                            selectedEventId = null
-                        }
-                    }
-                } else {
-                    Toast.makeText(this@MainActivity, "Gagal memuat event!", Toast.LENGTH_SHORT).show()
-                }
-            }
-
-            override fun onFailure(call: Call<EventResponse>, t: Throwable) {
-                Toast.makeText(this@MainActivity, "Koneksi gagal: ${t.message}", Toast.LENGTH_SHORT).show()
-            }
-        })
+    private fun startScan() {
+        val integrator = IntentIntegrator(this)
+        integrator.setPrompt("Arahkan kamera ke QR Tiket JumpFest")
+        integrator.setOrientationLocked(false)
+        integrator.setBeepEnabled(true)
+        integrator.initiateScan()
     }
 
-
-    /** 🔹 Fungsi pemrosesan hasil scan QR */
     override fun onActivityResult(requestCode: Int, resultCode: Int, data: android.content.Intent?) {
         val result = IntentIntegrator.parseActivityResult(requestCode, resultCode, data)
-        if (result != null && result.contents != null && selectedEventId != null) {
-            validateTicket(result.contents, selectedEventId!!)
+        if (result != null && result.contents != null) {
+            validateTicket(result.contents)
         } else {
             super.onActivityResult(requestCode, resultCode, data)
         }
     }
 
-    /** 🔹 Validasi tiket ke server */
-    private fun validateTicket(qrData: String, eventId: String) {
+    private fun validateTicket(qrData: String) {
         progressBar.visibility = View.VISIBLE
-        api.validateQr(qrData, eventId).enqueue(object : Callback<ValidationResponse> {
-            override fun onResponse(call: Call<ValidationResponse>, response: Response<ValidationResponse>) {
+
+        val body = mapOf(
+            "qr_code" to qrData,
+            "token" to SCANNER_TOKEN
+        )
+
+        api.scanTicket(body).enqueue(object : Callback<TicketResponse> {
+            override fun onResponse(call: Call<TicketResponse>, response: Response<TicketResponse>) {
                 progressBar.visibility = View.GONE
-                if (response.isSuccessful && response.body() != null) {
-                    val result = response.body()!!
-                    if (result.success) {
-                        showResultDialog("✅ Tiket Valid", "Nama: ${result.nama}\nNIK: ${result.nik}\nEvent: ${result.event}")
-                    } else {
-                        showResultDialog("❌ Tiket Tidak Valid", result.message)
-                    }
+
+                val res = response.body()
+                if (res == null) {
+                    showDialog("⚠️ Error", "Server tidak memberikan data.")
+                    return
+                }
+
+                if (res.status) {
+                    val msg = """
+                        Nama: ${res.buyer}
+                        Event: ${res.event}
+                        Tiket: ${res.ticket_type}
+                        Scan: ${res.scan_time}
+                    """.trimIndent()
+
+                    showDialog("✅ Tiket Valid", msg)
                 } else {
-                    showResultDialog("⚠️ Error", "Server tidak merespons dengan benar.")
+                    showDialog("❌ Tidak Valid", res.message)
                 }
             }
 
-            override fun onFailure(call: Call<ValidationResponse>, t: Throwable) {
+            override fun onFailure(call: Call<TicketResponse>, t: Throwable) {
                 progressBar.visibility = View.GONE
-                showResultDialog("❌ Koneksi Gagal", "Periksa koneksi internet atau server Anda.\n${t.message}")
+                showDialog("❌ Koneksi Gagal", t.message ?: "Error tidak diketahui")
             }
         })
     }
 
-    /** 🔹 Tampilkan dialog hasil */
-    private fun showResultDialog(title: String, message: String) {
+    private fun showDialog(title: String, message: String) {
         AlertDialog.Builder(this)
             .setTitle(title)
             .setMessage(message)
